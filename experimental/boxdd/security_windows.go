@@ -88,12 +88,10 @@ func secureWindowsInstallation(executablePath string, allowUnsafeInstallation bo
 
 func installedApplicationPath(daemonPath string) (string, string, error) {
 	daemonDirectory := filepath.Dir(daemonPath)
-	resourcesDirectory := filepath.Dir(daemonDirectory)
-	installationDirectory := filepath.Dir(resourcesDirectory)
+	installationDirectory := filepath.Dir(daemonDirectory)
 	if !strings.EqualFold(filepath.Base(daemonPath), daemonExecutableName) ||
-		!strings.EqualFold(filepath.Base(daemonDirectory), "daemon") ||
-		!strings.EqualFold(filepath.Base(resourcesDirectory), "resources") {
-		return "", "", E.New("daemon executable is outside the installed sing-box layout")
+		!strings.EqualFold(filepath.Base(daemonDirectory), "Core") {
+		return "", "", E.New("daemon executable is outside the installed WinSing layout")
 	}
 	return installationDirectory, filepath.Join(installationDirectory, applicationExecutableName), nil
 }
