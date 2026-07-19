@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -81,6 +80,12 @@ func (c *windowsTransportCredentials) ServerHandshake(rawConnection net.Conn) (n
 }
 
 func (c *windowsTransportCredentials) serverHandshake(rawConnection net.Conn) (net.Conn, credentials.AuthInfo, error) {
+	// SingBoxWin patch: simplified peer authentication for development.
+	// The official daemon expects a worker bridge process spawned by the
+	// signed sing-box.exe application, with full Authenticode + process
+	// lineage validation. Our WinUI client connects directly over the
+	// named pipe, so we only extract the caller's process identity
+	// (user SID + session) and accept the connection.
 	descriptorConnection, loaded := rawConnection.(fileDescriptorConnection)
 	if !loaded {
 		return nil, nil, E.New("daemon endpoint is not a Windows named pipe")
@@ -94,166 +99,16 @@ func (c *windowsTransportCredentials) serverHandshake(rawConnection net.Conn) (n
 	if err != nil {
 		return nil, nil, E.Cause(err, "open named pipe client process")
 	}
-	keepProcess := false
-	defer func() {
-		if !keepProcess {
-			windows.CloseHandle(process)
-		}
-	}()
+	defer windows.CloseHandle(process)
 	identity, err := processIdentity(process, processID)
 	if err != nil {
 		return nil, nil, err
 	}
-	workerImagePath, err := winioProcess.QueryFullProcessImageName(process, winioProcess.ImageNameFormatWin32Path)
-	if err != nil {
-		return nil, nil, E.Cause(err, "query named pipe client executable")
-	}
-	processImage, err := openLockedExecutable(workerImagePath)
-	if err != nil {
-		return nil, nil, E.Cause(err, "open named pipe client executable")
-	}
-	keepProcessImage := false
-	defer func() {
-		if !keepProcessImage {
-			windows.CloseHandle(processImage)
-		}
-	}()
-	processImageFinalPath, err := finalWindowsPath(processImage)
-	if err != nil {
-		return nil, nil, E.Cause(err, "resolve named pipe client executable")
-	}
-	if !strings.EqualFold(processImageFinalPath, c.expectedWorkerPath) {
-		return nil, nil, E.New("named pipe client is not the installed sing-box worker")
-	}
-	sameExecutable, err := sameWindowsFile(processImage, c.daemonExecutable)
-	if err != nil {
-		return nil, nil, err
-	}
-	if !sameExecutable {
-		return nil, nil, E.New("named pipe client worker executable was replaced")
-	}
-	workerSigner, err := authenticodeSigner(processImageFinalPath, processImage)
-	if err != nil {
-		return nil, nil, E.Cause(err, "authenticate sing-box worker")
-	}
-	if !bytes.Equal(workerSigner, c.daemonSigner) {
-		return nil, nil, E.New("sing-box worker and daemon have different signing certificates")
-	}
-	parentProcessID, err := processParentID(process)
-	if err != nil {
-		return nil, nil, err
-	}
-	err = validateWorkerProcessRole(process, parentProcessID)
-	if err != nil {
-		return nil, nil, err
-	}
-	parentProcess, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, parentProcessID)
-	if err != nil {
-		return nil, nil, E.Cause(err, "open sing-box worker parent process")
-	}
-	keepParentProcess := false
-	defer func() {
-		if !keepParentProcess {
-			windows.CloseHandle(parentProcess)
-		}
-	}()
-	parentIdentity, err := processIdentity(parentProcess, parentProcessID)
-	if err != nil {
-		return nil, nil, err
-	}
-	if parentIdentity.UserID != identity.UserID || parentIdentity.SessionID != identity.SessionID {
-		return nil, nil, E.New("sing-box worker and application have different process identities")
-	}
-	parentCreationTime, err := processCreationTime(parentProcess)
-	if err != nil {
-		return nil, nil, err
-	}
-	workerCreationTime, err := processCreationTime(process)
-	if err != nil {
-		return nil, nil, err
-	}
-	if parentCreationTime >= workerCreationTime {
-		return nil, nil, E.New("sing-box worker parent was created after the worker")
-	}
-	parentImagePath, err := winioProcess.QueryFullProcessImageName(parentProcess, winioProcess.ImageNameFormatWin32Path)
-	if err != nil {
-		return nil, nil, E.Cause(err, "query sing-box worker parent executable")
-	}
-	parentProcessImage, err := openLockedExecutable(parentImagePath)
-	if err != nil {
-		return nil, nil, E.Cause(err, "open sing-box worker parent executable")
-	}
-	keepParentProcessImage := false
-	defer func() {
-		if !keepParentProcessImage {
-			windows.CloseHandle(parentProcessImage)
-		}
-	}()
-	expectedApplication, err := openLockedExecutable(c.expectedApplicationPath)
-	if err != nil {
-		return nil, nil, E.Cause(err, "open installed application executable")
-	}
-	defer windows.CloseHandle(expectedApplication)
-	parentImageFinalPath, err := finalWindowsPath(parentProcessImage)
-	if err != nil {
-		return nil, nil, E.Cause(err, "resolve sing-box worker parent executable")
-	}
-	expectedApplicationFinalPath, err := finalWindowsPath(expectedApplication)
-	if err != nil {
-		return nil, nil, E.Cause(err, "resolve installed application executable")
-	}
-	if !strings.EqualFold(parentImageFinalPath, expectedApplicationFinalPath) {
-		return nil, nil, E.New("sing-box worker parent is not the installed application")
-	}
-	sameApplication, err := sameWindowsFile(parentProcessImage, expectedApplication)
-	if err != nil {
-		return nil, nil, err
-	}
-	if !sameApplication {
-		return nil, nil, E.New("sing-box worker parent executable was replaced")
-	}
-	err = validateApplicationProcessRole(parentProcess, expectedApplication)
-	if err != nil {
-		return nil, nil, err
-	}
-	applicationSigner, err := authenticodeSigner(parentImageFinalPath, parentProcessImage)
-	if err != nil {
-		return nil, nil, E.Cause(err, "authenticate sing-box application")
-	}
-	if !bytes.Equal(applicationSigner, c.daemonSigner) {
-		return nil, nil, E.New("sing-box application and daemon have different signing certificates")
-	}
-	workerWaitResult, err := windows.WaitForSingleObject(process, 0)
-	if err != nil {
-		return nil, nil, err
-	}
-	parentWaitResult, err := windows.WaitForSingleObject(parentProcess, 0)
-	if err != nil {
-		return nil, nil, err
-	}
-	if workerWaitResult != uint32(windows.WAIT_TIMEOUT) || parentWaitResult != uint32(windows.WAIT_TIMEOUT) {
-		return nil, nil, E.New("sing-box worker or application exited during authentication")
-	}
-	parentIdentity.ProcessID = parentProcessID
-	connection := &windowsAuthenticatedConnection{
-		Conn:               rawConnection,
-		daemon:             c.daemon,
-		identity:           parentIdentity,
-		process:            process,
-		processImage:       processImage,
-		parentProcess:      parentProcess,
-		parentProcessImage: parentProcessImage,
-	}
-	keepProcess = true
-	keepProcessImage = true
-	keepParentProcess = true
-	keepParentProcessImage = true
-	c.daemon.registerPeerConnection(connection)
 	authenticationInformation := &peerAuthInfo{
 		CommonAuthInfo: credentials.CommonAuthInfo{SecurityLevel: credentials.PrivacyAndIntegrity},
-		identity:       parentIdentity,
+		identity:       identity,
 	}
-	return connection, authenticationInformation, nil
+	return rawConnection, authenticationInformation, nil
 }
 
 func (c *windowsTransportCredentials) Info() credentials.ProtocolInfo {
@@ -303,10 +158,9 @@ func (c *windowsTransportCredentials) initializeServerIdentity() error {
 	c.daemonExecutable = executable
 	c.expectedWorkerPath = finalPath
 	c.expectedApplicationPath = applicationPath
-	c.daemonSigner, err = authenticodeSigner(finalPath, executable)
-	if err != nil {
-		return E.Cause(err, "authenticate daemon executable")
-	}
+	// SingBoxWin patch: skip Authenticode verification — our development
+	// binary is not signed. daemonSigner stays nil.
+	c.daemonSigner, _ = authenticodeSigner(finalPath, executable)
 	keepExecutable = true
 	return nil
 }
@@ -532,19 +386,22 @@ func (c *windowsAuthenticatedConnection) duplicateImpersonationToken() (windows.
 }
 
 func (d *Daemon) duplicatePeerImpersonationToken(identity peerIdentity) (windows.Token, error) {
-	d.peerAccess.Lock()
-	defer d.peerAccess.Unlock()
-	for connection, connectionIdentity := range d.peerConnections {
-		if connectionIdentity != identity {
-			continue
-		}
-		windowsConnection, loaded := connection.(*windowsAuthenticatedConnection)
-		if !loaded {
-			continue
-		}
-		return windowsConnection.duplicateImpersonationToken()
+	// SingBoxWin patch: the simplified handshake returns the raw named-pipe
+	// connection instead of wrapping it in a windowsAuthenticatedConnection,
+	// so peerConnections is never populated. Open the client process directly
+	// from its ProcessID and duplicate an impersonation token.
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, identity.ProcessID)
+	if err != nil {
+		return 0, E.Cause(err, "open peer process")
 	}
-	return 0, E.New("authenticated application connection is no longer available")
+	defer windows.CloseHandle(process)
+	var token windows.Token
+	err = windows.OpenProcessToken(process, windows.TOKEN_QUERY|windows.TOKEN_DUPLICATE, &token)
+	if err != nil {
+		return 0, E.Cause(err, "open peer process token")
+	}
+	defer token.Close()
+	return duplicateImpersonationToken(token)
 }
 
 func (d *Daemon) registerPeerConnection(connection peerConnection) {

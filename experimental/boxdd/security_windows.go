@@ -40,6 +40,13 @@ func secureWindowsInstallation(executablePath string, allowUnsafeInstallation bo
 	if err != nil {
 		return "", err
 	}
+	// SingBoxWin patch: skip application executable + Authenticode certificate
+	// comparison. Our development build is unsigned and has no sing-box.exe
+	// beside the daemon. The allowUnsafeInstallation flag (always passed by
+	// the C# installer) short-circuits the remaining NTFS/ACL hardening.
+	if allowUnsafeInstallation {
+		return daemonPath, nil
+	}
 	applicationExecutable, err := openLockedExecutable(applicationPath)
 	if err != nil {
 		return "", E.Cause(err, "open installed application")
@@ -87,14 +94,11 @@ func secureWindowsInstallation(executablePath string, allowUnsafeInstallation bo
 }
 
 func installedApplicationPath(daemonPath string) (string, string, error) {
+	// SingBoxWin patch: skip the official layout check
+	// (resources/daemon/sing-box-daemon.exe + sing-box.exe at root).
+	// Our development build uses a flat directory structure.
 	daemonDirectory := filepath.Dir(daemonPath)
-	resourcesDirectory := filepath.Dir(daemonDirectory)
-	installationDirectory := filepath.Dir(resourcesDirectory)
-	if !strings.EqualFold(filepath.Base(daemonPath), daemonExecutableName) ||
-		!strings.EqualFold(filepath.Base(daemonDirectory), "daemon") ||
-		!strings.EqualFold(filepath.Base(resourcesDirectory), "resources") {
-		return "", "", E.New("daemon executable is outside the installed sing-box layout")
-	}
+	installationDirectory := filepath.Dir(daemonDirectory)
 	return installationDirectory, filepath.Join(installationDirectory, applicationExecutableName), nil
 }
 

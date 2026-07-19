@@ -23,7 +23,11 @@ const pipeSecurityDescriptor = `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)`
 // pipe buffer.
 const (
 	pipeBufferSize = 65536
-	daemonPipePath = `\\.\pipe\ProtectedPrefix\Administrators\sing-box`
+	// SingBoxWin patch: isolate the daemon pipe from the official client so
+	// both can run on the same machine. Upstream uses
+	// `...\ProtectedPrefix\Administrators\sing-box`; we append `-win`. This value
+	// MUST match DaemonPaths.ProtectedPipeName on the C# side.
+	daemonPipePath = `\\.\pipe\ProtectedPrefix\Administrators\sing-box-win`
 )
 
 func listenEndpoint() (net.Listener, error) {
